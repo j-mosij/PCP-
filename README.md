@@ -1,2 +1,113 @@
-# PCP-
-pre-code-purification 
+Python Algorithm: HTML Injection & Syntax Anomaly Scanner
+Python
+import html
+import re
+from html.parser import HTMLParser
+
+class HTMLInjectionScanner(HTMLParser):
+    def __init__(self, allowed_tags=None, allowed_attributes=None):
+        super().__init__()
+        # Whitelists for safe rendering (default to strict or empty for pure sanitization)
+        self.allowed_tags = set(allowed_tags or [])
+        self.allowed_attributes = set(allowed_attributes or [])
+        
+        # Tracking states
+        self.anomalies = []
+        self.tag_stack = []
+        self.is_safe = True
+
+    def handle_starttag(self, tag, attrs):
+        tag_lower = tag.lower()
+        
+        # 1. Check against disallowed / high-risk tags (e.g., script, iframe, object, embed, form)
+        high_risk_tags = {'script', 'iframe', 'object', 'embed', 'form', 'base', 'meta', 'link', 'style'}
+        if tag_lower in high_risk_tags:
+            self._flag(f"High-risk injection vector tag detected: <{tag_lower}>")
+
+        if self.allowed_tags and tag_lower not in self.allowed_tags:
+            self._flag(f"Disallowed tag encountered: <{tag_lower}>")
+
+        self.tag_stack.append(tag_lower)
+
+        # 2. Inspect attributes for event handlers (on*), javascript: URIs, or malformed injections
+        attr_dict = {}
+        for attr, value in attrs:
+            attr_lower = attr.lower()
+            val_str = str(value).lower() if value else ""
+
+            # Detect inline event handlers (e.g., onload, onerror, onclick)
+            if attr_lower.startswith('on'):
+                self._flag(f"Malicious event handler attribute found: '{attr_lower}' in tag <{tag_lower}>")
+
+            # Detect javascript: or data: URI schemes designed for XSS/injection
+            if attr_lower in {'href', 'src', 'action', 'formaction', 'data'} and ('javascript:' in val_str or 'data:' in val_str):
+                self._flag(f"Dangerous URI scheme detected in attribute '{attr_lower}': {value}")
+
+            # Check for attribute-breaking attempts (quotes, unescaped control chars)
+            if re.search(r'[\'"\s><=]', attr_lower):
+                self._flag(f"Suspicious characters in attribute name: '{attr}'")
+
+            attr_dict[attr_lower] = value
+
+    def handle_endtag(self, tag):
+        tag_lower = tag.lower()
+        if not self.tag_stack:
+            self._flag(f"Unmatched closing tag detected: </{tag_lower}>")
+            return
+        
+        expected_tag = self.tag_stack.pop()
+        if expected_tag != tag_lower:
+            self._flag(f"Mismatched tag nesting: expected </{expected_tag}>, got </{tag_lower}>")
+
+    def handle_data(self, data):
+        # Scan raw data text for structural script/template indicators if unescaped
+        if "<script" in data.lower() or "javascript:" in data.lower():
+            self._flag("Suspicious script tokens found inside raw text node.")
+
+    def _flag(self, message):
+        self.is_safe = False
+        self.anomalies.append(message)
+
+    @classmethod
+    def scan(cls, raw_html, allowed_tags=None, allowed_attributes=None):
+        scanner = cls(allowed_tags, allowed_attributes)
+        try:
+            scanner.feed(raw_html)
+            scanner.close()
+        except Exception as e:
+            scanner._flag(f"Parser exception (possible malformed injection/syntax fuzzing): {str(e)}")
+        
+        return {
+            "is_safe": scanner.is_safe,
+            "anomalies": scanner.anomalies
+        }
+
+# ==========================================
+# Example Test Cases
+# ==========================================
+if __name__ == "__main__":
+    payloads = [
+        "Hello world, this is normal text.",
+        "<script>alert(1)</script>",
+        "<img src='x' onerror='alert(document.cookie)'>",
+        "<a href='javascript:alert(1)'>Click me</a>",
+        "<div style='background:url(javascript:alert(1))'>X</div>",
+        "<b>Unmatched tag structure mismatch</p>"
+    ]
+
+    for idx, payload in enumerate(payloads, 1):
+        result = HTMLInjectionScanner.scan(payload)
+        print(f"Payload {idx}: {payload}")
+        print(f"Result Safe: {result['is_safe']}")
+        if not result['is_safe']:
+            print(f"Anomalies: {result['anomalies']}")
+        print("-" * 50)
+How the Algorithm Works Against W3C Syntax Edge Cases
+Token State Tracking (HTMLParser):
+HTML5 specs permit several parsing quirks (e.g., omitted quotes, self-closing tags on non-void elements, misnested formatting tags). The algorithm hooks into the parsing stream to trace element lifecycles (handle_starttag, handle_endtag), highlighting structural anomalies where an attacker attempts to break container contexts.
+Attribute & Vector Fuzzing Inspection:
+Event Handlers (on*): Catches code executions like onerror, onload, or onmouseover embedded dynamically inside tags.
+Protocol Schemes: Flags javascript: and unsafe data: payloads hidden inside structural attributes (href, src, action).
+Attribute Breaking: Looks for illegal boundary characters (', ", >, <, =) inside attribute names that attackers use to inject custom attributes into elements prematurely.
+Contextual Escaping / Sanitization Recommendation:
+While detection helps catch and block attacks, robust engineering requires context-aware output encoding (such as translating < to &lt; and > to &gt;) before text hits the DOM tree, ensuring the browser treats payloads as inert strings rather than executable markup.
